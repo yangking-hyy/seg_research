@@ -1,0 +1,309 @@
+import os
+import time
+from collections import Counter
+
+import jieba
+import thulac
+from pyltp import Segmentor
+from LAC import LAC
+import pkuseg
+import prettytable as pt
+from pyhanlp import HanLP
+import hanlp
+
+
+"""
+LAC==2.0.4
+hanlp==2.0.0a46
+jieba==0.42.1
+pkuseg==0.0.25
+prettytable==0.7.2
+pyhanlp==0.1.66
+pyltp==0.2.1
+thulac==0.2.1
+"""
+
+
+def construct_corpus(infile, repeat_time=1):
+    corpus = []
+    with open(infile, 'r', encoding='utf-8') as f:
+        for line in f:
+            con = line.strip().lower()
+            corpus.append(con)
+    corpus = corpus * repeat_time
+    print('语料库大小: {}'.format(len(corpus)))
+    return corpus
+
+
+def load_result(infile, delimiter='='):
+    result = []
+    with open(infile, 'r', encoding='utf-8') as f:
+        for line in f:
+            con = line.strip().lower().split(delimiter)
+            result.append(con)
+    return result
+
+
+def evaluate(algorithm_seg_file, manual_seg_file):
+    p = []
+    r = []
+    f1 = []
+    algorithm_result = load_result(algorithm_seg_file)
+    manual_result = load_result(manual_seg_file)
+
+    assert len(algorithm_result) == len(manual_result)
+
+    for i in range(len(algorithm_result)):
+        alg = Counter(algorithm_result[i])
+        man = Counter(manual_result[i])
+        inter = sum((alg & man).values())
+        tmp_p = inter / (len(algorithm_result[i]) + 1e-10)
+        tmp_r = inter / (len(manual_result[i]) + 1e-10)
+        tmp_f1 = 2 * tmp_p * tmp_r / (tmp_p + tmp_r + 1e-10)
+        p.append(tmp_p)
+        r.append(tmp_r)
+        f1.append(tmp_f1)
+
+    return sum(p) / len(p), sum(r) / len(r), sum(f1) / len(f1)
+
+
+def get_average_segment_length(file):
+    seg_length = []
+    with open(file, 'r', encoding='utf-8') as f:
+        for line in f:
+            # 一般处理一行用line.rstrip('\r\n')，即去掉右边的空格和换行
+            # 这里直接用line.strip()去掉首尾的空格和换行
+            content = line.strip().split('=')
+            content = list(filter(lambda x: x.strip() != '', content))
+            seg_length.append(len(content))
+    return sum(seg_length) / len(seg_length)
+
+
+def seg_with_baidu_lac(corpus, in_file, out_file, manual_seg_file):
+    lac = LAC(mode='seg')
+    # test accuracy
+    with open(out_file, 'w', encoding='utf-8') as f:
+        for text in corpus:
+            seg_result = lac.run(text)
+            f.write('='.join(seg_result) + '\n')
+            f.flush()
+    p, r, f1 = evaluate(out_file, manual_seg_file)
+
+    # test average_segment_length
+    average_segment_length = get_average_segment_length(out_file)
+
+    # test qps
+    corpus = corpus * 10
+    start = time.time()
+    for text in corpus:
+        seg_result = lac.run(text)
+    end = time.time()
+    qps = len(corpus) / (end - start)
+
+    return qps, p, r, f1, average_segment_length
+
+
+def seg_with_jieba(corpus, in_file, out_file, manual_seg_file):
+    # test accuracy
+    with open(out_file, 'w', encoding='utf-8') as f:
+        for text in corpus:
+            seg_result = jieba.cut(text, cut_all=False)
+            f.write('='.join(seg_result) + '\n')
+            f.flush()
+    p, r, f1 = evaluate(out_file, manual_seg_file)
+
+    # test average_segment_length
+    average_segment_length = get_average_segment_length(out_file)
+
+    # test qps
+    corpus = corpus * 10
+    start = time.time()
+    for text in corpus:
+        seg_result = jieba.cut(text, cut_all=False)
+        seg_result = list(seg_result)
+    end = time.time()
+    qps = len(corpus) / (end - start)
+
+    return qps, p, r, f1, average_segment_length
+
+
+def seg_with_jieba_paddle(corpus, in_file, out_file, manual_seg_file):
+    jieba.enable_paddle()
+
+    # test accuracy
+    with open(out_file, 'w', encoding='utf-8') as f:
+        for text in corpus:
+            seg_result = jieba.cut(text, use_paddle=True)
+            f.write('='.join(seg_result) + '\n')
+            f.flush()
+    p, r, f1 = evaluate(out_file, manual_seg_file)
+
+    # test average_segment_length
+    average_segment_length = get_average_segment_length(out_file)
+
+    # test qps
+    corpus = corpus * 10
+    start = time.time()
+    for text in corpus:
+        seg_result = jieba.cut(text, use_paddle=True)
+        seg_result = list(seg_result)
+    end = time.time()
+    qps = len(corpus) / (end - start)
+
+    return qps, p, r, f1, average_segment_length
+
+
+def seg_with_thulac(corpus, in_file, out_file, manual_seg_file):
+    thu = thulac.thulac(seg_only=True)
+    # test accuracy
+    with open(out_file, 'w', encoding='utf-8') as f:
+        for text in corpus:
+            seg_result = thu.cut(text, text=True).split()
+            f.write('='.join(seg_result) + '\n')
+            f.flush()
+    p, r, f1 = evaluate(out_file, manual_seg_file)
+
+    # test average_segment_length
+    average_segment_length = get_average_segment_length(out_file)
+
+    # test qps
+    corpus = corpus * 10
+    start = time.time()
+    for text in corpus:
+        seg_result = thu.cut(text, text=True)
+    end = time.time()
+    qps = len(corpus) / (end - start)
+
+    return qps, p, r, f1, average_segment_length
+
+
+def seg_with_ltp(corpus, in_file, out_file, manual_seg_file):
+    segmentor = Segmentor()
+    segmentor.load("model/ltp_data_v3.4.0/cws.model")
+
+    # test accuracy
+    with open(out_file, 'w', encoding='utf-8') as f:
+        for text in corpus:
+            seg_result = segmentor.segment(text)
+            f.write('='.join(seg_result) + '\n')
+            f.flush()
+    p, r, f1 = evaluate(out_file, manual_seg_file)
+
+    # test average_segment_length
+    average_segment_length = get_average_segment_length(out_file)
+
+    # test qps
+    corpus = corpus * 10
+    start = time.time()
+    for text in corpus:
+        seg_result = segmentor.segment(text)
+    end = time.time()
+    qps = len(corpus) / (end - start)
+
+    return qps, p, r, f1, average_segment_length
+
+
+def seg_with_pku(corpus, in_file, out_file, manual_seg_file):
+    seg = pkuseg.pkuseg()
+    # test accuracy
+    with open(out_file, 'w', encoding='utf-8') as f:
+        for text in corpus:
+            seg_result = seg.cut(text)
+            f.write('='.join(seg_result) + '\n')
+            f.flush()
+    p, r, f1 = evaluate(out_file, manual_seg_file)
+
+    # test average_segment_length
+    average_segment_length = get_average_segment_length(out_file)
+
+    # test qps
+    corpus = corpus * 10
+    start = time.time()
+    for text in corpus:
+        seg_result = seg.cut(text)
+    end = time.time()
+    qps = len(corpus) / (end - start)
+
+    return qps, p, r, f1, average_segment_length
+
+
+def seg_with_hanlp_v1(corpus, in_file, out_file, manual_seg_file):
+    # test accuracy
+    with open(out_file, 'w', encoding='utf-8') as f:
+        for text in corpus:
+            seg_result = [term.word for term in HanLP.segment(text)]
+            f.write('='.join(seg_result) + '\n')
+            f.flush()
+    p, r, f1 = evaluate(out_file, manual_seg_file)
+
+    # test average_segment_length
+    average_segment_length = get_average_segment_length(out_file)
+
+    # test qps
+    corpus = corpus * 10
+    start = time.time()
+    for text in corpus:
+        _ = HanLP.segment(text)
+    end = time.time()
+    qps = len(corpus) / (end - start)
+
+    return qps, p, r, f1, average_segment_length
+
+
+def seg_with_hanlp_v2(corpus, in_file, out_file, manual_seg_file):
+    tokenizer = hanlp.load('PKU_NAME_MERGED_SIX_MONTHS_CONVSEG')
+
+    # test accuracy
+    with open(out_file, 'w', encoding='utf-8') as f:
+        for text in corpus:
+            seg_result = tokenizer(text)
+            f.write('='.join(seg_result) + '\n')
+            f.flush()
+    p, r, f1 = evaluate(out_file, manual_seg_file)
+
+    # test average_segment_length
+    average_segment_length = get_average_segment_length(out_file)
+
+    # test qps
+    start = time.time()
+    corpus = corpus * 10
+    for text in corpus:
+        _ = tokenizer(text)
+    end = time.time()
+    qps = len(corpus) / (end - start)
+
+    return qps, p, r, f1, average_segment_length
+
+
+if __name__ == '__main__':
+    test_list = [
+        (seg_with_baidu_lac, '_baidu_lac.txt', '百度LAC'),
+        (seg_with_jieba, '_jieba.txt', '结巴分词'),
+        (seg_with_jieba_paddle, '_jieba_paddle.txt', '结巴paddle'),
+        (seg_with_thulac, '_thulac.txt', '清华thulac'),
+        (seg_with_ltp, '_ltp.txt', '哈工大ltp'),
+        (seg_with_pku, '_pku.txt', '北大pku'),
+        (seg_with_hanlp_v1, 'hanlp_v1.txt', 'HanLP_v1'),
+        (seg_with_hanlp_v2, 'hanlp_v2.txt', 'HanLP_v2'),
+        # ...
+    ]
+
+    """
+    ('data/corpus_ag.txt', 'data/corpus_ag_manual.txt'),
+                 ('data/corpus_video.txt', 'data/corpus_video_manual.txt')
+    """
+    file_list = [('seg_result/corpus_weibo.txt', 'seg_result/corpus_weibo_manual.txt')]
+
+
+    for in_file, manual_seg_file in file_list:
+        print(in_file)
+        corpus = construct_corpus(in_file)
+
+        tb = pt.PrettyTable()
+        tb.field_names = ['分词工具', 'QPS', '精度', '召回', 'F1', '句子平均词数']
+
+        for func, suffix, name in test_list:
+            result = func(corpus, in_file, os.path.splitext(in_file)[0] + suffix, manual_seg_file)
+            tb.add_row([name] + list(result))
+
+        print(tb)
